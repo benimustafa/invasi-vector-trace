@@ -224,6 +224,23 @@
       <input type="range" id="detailSlider" min="0" max="40" step="1">
     </div>
     <div class="ticks"><span>Detail (banyak node)</span><span>Bersih (sedikit node)</span></div>
+
+    <label class="field">Halus garis (perbaiki tepi gerigi)</label>
+    <div class="slider-row">
+      <input type="range" id="curveSlider" min="0.2" max="6" step="0.1">
+    </div>
+    <div class="ticks"><span>Tajam (ikut pixel persis)</span><span>Mulus</span></div>
+    <p class="hint">Naikkan ke kanan kalau garis diagonal/lengkung keliatan bergerigi pas di-zoom.</p>
+
+    <label class="field" style="display:flex; align-items:center; gap:8px; margin-top:16px;">
+      <input type="checkbox" id="rightAngleCheck" style="width:auto;">
+      Right-angle enhance (khusus shape kotak/siku — bisa bikin garis diagonal jadi gerigi kalau dipaksa aktif)
+    </label>
+
+    <label class="field" style="display:flex; align-items:center; gap:8px; margin-top:10px;">
+      <input type="checkbox" id="removeBgCheck" style="width:auto;" checked>
+      Buang otomatis layer background (putih/transparan) — hindari perlu hapus manual di Illustrator
+    </label>
   </div>
 
   <div class="card">
@@ -269,9 +286,9 @@
 <script>
 (function(){
   const presets = {
-    flat:     { colors: 8,  detail: 8,  note: "Untuk shape solid, garis tegas, warna flat biasa.", rightangleenhance: true },
-    vintage:  { colors: 6,  detail: 3,  note: "Warna dibatasi biar 2–3 tone khas vintage. Detail rendah dijaga biar halftone dot kecil gak ke-buang.", rightangleenhance: true },
-    crayon:   { colors: 14, detail: 6,  note: "Eksperimental — grain crayon sebagian dipertahankan. Naikkan slider detail ke kanan (Clean) kalau file kebanyakan node kecil.", rightangleenhance: false }
+    flat:     { colors: 8,  detail: 8,  curve: 1,   note: "Untuk shape solid, garis tegas, warna flat biasa.", rightangleenhance: true },
+    vintage:  { colors: 6,  detail: 3,  curve: 1.5, note: "Warna dibatasi biar 2–3 tone khas vintage. Detail rendah dijaga biar halftone dot kecil gak ke-buang.", rightangleenhance: false },
+    crayon:   { colors: 14, detail: 6,  curve: 1.5, note: "Eksperimental — grain crayon sebagian dipertahankan. Naikkan slider detail ke kanan (Clean) kalau file kebanyakan node kecil.", rightangleenhance: false }
   };
 
   const dropZone = document.getElementById('dropZone');
@@ -281,6 +298,9 @@
   const colorsSlider = document.getElementById('colorsSlider');
   const colorsLabel = document.getElementById('colorsLabel');
   const detailSlider = document.getElementById('detailSlider');
+  const curveSlider = document.getElementById('curveSlider');
+  const rightAngleCheck = document.getElementById('rightAngleCheck');
+  const removeBgCheck = document.getElementById('removeBgCheck');
   const traceBtn = document.getElementById('traceBtn');
   const statusText = document.getElementById('statusText');
   const previewGrid = document.getElementById('previewGrid');
@@ -319,6 +339,8 @@
     if (!p) return;
     colorsSlider.value = p.colors;
     detailSlider.value = p.detail;
+    curveSlider.value = p.curve;
+    rightAngleCheck.checked = p.rightangleenhance;
     colorsLabel.textContent = colorsSlider.value;
     presetNote.textContent = p.note;
   }
@@ -395,10 +417,10 @@
       const imgd = ctx.getImageData(0,0,canvas.width,canvas.height);
 
       const options = {
-        ltres: 1,
-        qtres: 1,
+        ltres: parseFloat(curveSlider.value),
+        qtres: parseFloat(curveSlider.value),
         pathomit: parseInt(detailSlider.value, 10),
-        rightangleenhance: presets[presetSelect.value].rightangleenhance,
+        rightangleenhance: rightAngleCheck.checked,
         colorsampling: 2,
         numberofcolors: parseInt(colorsSlider.value, 10),
         mincolorratio: 0,
@@ -410,7 +432,34 @@
         strokewidth: 1
       };
 
-      const svgstr = ImageTracer.imagedataToSVG(imgd, options);
+      const tracedata = ImageTracer.imagedataToTracedata(imgd, options);
+
+      const svgW = tracedata.width * options.scale;
+      const svgH = tracedata.height * options.scale;
+      let svgstr = '<svg ' + (options.viewbox ? 'viewBox="0 0 ' + svgW + ' ' + svgH + '" ' : 'width="' + svgW + '" height="' + svgH + '" ') +
+        'version="1.1" xmlns="http://www.w3.org/2000/svg" desc="Created with imagetracer.js v' + ImageTracer.versionnumber + '" >';
+      let groupCount = 0;
+      let bgLayersSkipped = 0;
+      for (let k = 0; k < tracedata.layers.length; k++) {
+        const col = tracedata.palette[k];
+        const isNearTransparent = col.a < 10;
+        const isNearWhite = col.r > 235 && col.g > 235 && col.b > 235;
+        if (removeBgCheck.checked && (isNearTransparent || isNearWhite)) {
+          bgLayersSkipped++;
+          continue;
+        }
+        let layerPaths = '';
+        for (let p = 0; p < tracedata.layers[k].length; p++) {
+          if (!tracedata.layers[k][p].isholepath) {
+            layerPaths += ImageTracer.svgpathstring(tracedata, k, p, options);
+          }
+        }
+        if (layerPaths) {
+          svgstr += '<g id="color-' + k + '">' + layerPaths + '</g>';
+          groupCount++;
+        }
+      }
+      svgstr += '</svg>';
       lastSVG = svgstr;
 
       svgPreview.innerHTML = svgstr;
@@ -420,8 +469,10 @@
 
       statsRow.innerHTML =
         '<span>Path: <b>' + pathCount + '</b></span>' +
+        '<span>Grup warna: <b>' + groupCount + '</b></span>' +
         '<span>File size: <b>' + sizeLabel + '</b></span>' +
-        '<span>Dimensi: <b>' + canvas.width + '×' + canvas.height + '</b></span>';
+        '<span>Dimensi: <b>' + canvas.width + '×' + canvas.height + '</b></span>' +
+        (bgLayersSkipped > 0 ? '<span>Layer bg dibuang: <b>' + bgLayersSkipped + '</b></span>' : '');
 
       previewGrid.style.display = 'grid';
       statsRow.style.display = 'flex';
